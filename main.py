@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import sys
+import os.path
+from os import path
 import time
 import pandas as pd
 import geopandas as gpd
@@ -9,11 +11,40 @@ import networkx as nx
 from QUANT.PublicTransportNetwork import PublicTransportNetwork
 
 ################################################################################
+# Global definitions
+################################################################################
+
+#constants definitions
+
+#walking node fixup distance is used to connect network nodes that are walkable e.g.
+#where there are two bus routes but none of the stops are shared, then this puts a
+#walking link between network segements to make them connected - lower is better
+#as it tends to add in lots of additional network links
+walkFixupDistMetres = 500
+
+#input files
+zonesDataFilename = 'athens/Data_LUTI_Athens/zones_data.csv'
+zoneCentroidsShapefilenameWGS84 = 'athens/Zone_boundaries/zone_centroids_WGS84.shp'
+zoneBoundariesShapefilenameWGS84 = 'athens/Zone_boundaries/zones_boundaries_WGS84.shp'
+athensGTFSDir = 'athens/gtfs'
+
+#output files
+modelDataDir = 'model-data' #all results go in here
+graphMLFilename = 'model-data/graph_OASA.graphml' #network graph built from GTFS files
+graphVertexPositionsFilename = 'model-data/vertices_OASA.csv' #lat/lon of nodes in graphml file above
+zoneCentroidLookupFilename = 'model-data/zone_centroid_lookup.csv' #closest graph vertex to zone centroids
+cijCostMatrixFilename = 'model-data/Cij_public.csv' #this is the travel cost matrix
+
+################################################################################
 # Main program
 ################################################################################
 
+#make model-data dir if if doesn't already exist
+if not path.exists(modelDataDir):
+    os.mkdir(modelDataDir)
+
 #load luti/zones_data.csv - contains mapping between zonei number and zone code string
-dfZonesData = pd.read_csv('athens/Data_LUTI_Athens/zones_data.csv',dtype={'zone':str})
+dfZonesData = pd.read_csv(zonesDataFilename,dtype={'zone':str})
 #NOTE: use the zone field as the area key
 #BUT with the leading zero suppressed - this matches "NO_" field in the shapefile
 
@@ -21,36 +52,53 @@ print("Building Athens transport network from GTFS files")
 
 print("initialise ptn")
 ptn = PublicTransportNetwork()
-#Tram = 0, Subway = 1, Rail = 2, Bus = 3, Ferry = 4, CableCar = 5, Gondola = 6, Funicular = 7
-#ptn.initialiseGTFSNetworkGraph(["athens/gtfs"],{'*'}) #{1,3,800,900}?
-#count = ptn.FixupWalkingNodes(500)
 
-#print("after fixup walking nodes: ", str(ptn.graph.number_of_nodes())," vertices and ", str(ptn.graph.number_of_edges()), " edges in network.")
-#ptn.writeGraphML("model-data/graph_OASA.graphml")
-#ptn.writeVertexPositions("model-data/vertices_OASA.csv") #note: you also need the vertex position map, otherwise you don't know where the graphml vertices are
+################################################################################
+# Make GraphML network file from GTFS data
+################################################################################
 
-#finished network graph creation here
-##cheat - load graph for speed
-ptn.readGraphML("model-data/graph_OASA.graphml")
+if not path.exists(graphMLFilename):
+    print('File %s does not exist, so creating new' % graphMLFilename)
+    #Tram = 0, Subway = 1, Rail = 2, Bus = 3, Ferry = 4, CableCar = 5, Gondola = 6, Funicular = 7
+    ptn.initialiseGTFSNetworkGraph([athensGTFSDir],{'*'}) #{1,3,800,900}?
+    count = ptn.FixupWalkingNodes(walkFixupDistMetres)
+
+    print('after fixup walking nodes: ', str(ptn.graph.number_of_nodes())," vertices and ", str(ptn.graph.number_of_edges()), " edges in network.")
+    ptn.writeGraphML(graphMLFilename)
+    ptn.writeVertexPositions(graphVertexPositionsFilename) #note: you also need the vertex position map, otherwise you don't know where the graphml vertices are
+
+    #finished network graph creation here
+else:
+    #load exsting graph for speed
+    print('File %s exists, skipping creation' % graphMLFilename)
+    ptn.readGraphML(graphMLFilename)
 ###
 
-print("zone codes")
+################################################################################
+# Centroid lookup
+################################################################################
+
+print('Loading zone codes from %s',zoneCentroidsShapefilenameWGS84)
 #ZoneLookup is the mapping between the zone code numbers and the MSOA code and lat/lon
 #zonecentroids and boundaries has field "NO_" which is the areakey
 #NOTE: NO_ is the same as CODE, but with the leading zero missing - must use NO_ to match other data
-ZoneLookup = gpd.read_file('athens/Zone_boundaries/zone_centroids_WGS84.shp',dtype={'NO_':str,'CODE':str})
+ZoneLookup = gpd.read_file(zoneCentroidsShapefilenameWGS84,dtype={'NO_':str,'CODE':str})
 #need to force type on shapefile columns as dtype in above read_file doesn't work!
 ZoneLookup['NO_'] = ZoneLookup['NO_'].astype(str)
 
-#use reproject into wgs84 as that's what gtfs is in
-#CentroidLookup = ptn.FindCentroids(
-#    ZoneLookup,
-#    'athens/Zone_boundaries/zones_boundaries_WGS84.shp', 'NO_'
-#)
-#save it!
-#ptn.saveCentroids(CentroidLookup,"model-data/zone_centroid_lookup.csv")
-## cheat - load centroids for speed
-CentroidLookup = ptn.loadCentroids("model-data/zone_centroid_lookup.csv")
+if not path.exists(zoneCentroidLookupFilename):
+    print('File %s does not exist, creating new' % zoneCentroidLookupFilename)
+    #use reproject into wgs84 as that's what gtfs is in
+    CentroidLookup = ptn.FindCentroids(
+        ZoneLookup,
+        zoneBoundariesShapefilenameWGS84, 'NO_'
+    )
+    #save it!
+    ptn.saveCentroids(CentroidLookup,zoneCentroidLookupFilename)
+else:
+    print('File %s exists, skipping creation' % zoneCentroidLookupFilename)
+    ## load centroids for speed
+    CentroidLookup = ptn.loadCentroids(zoneCentroidLookupFilename)
 ###
 
 ################################################################################
@@ -82,7 +130,7 @@ for index, row in dfZonesData.iterrows():
 #end for
 
 #now onto the shortest paths
-print("running shortest paths")
+print("Running shortest paths")
 
 #needs CUDA install to be able to do this...
 #shortestPaths = ptn.TestCUDASSSP(ZoneLookup.dt,RailCentroidLookup)
@@ -101,14 +149,14 @@ result = nx.all_pairs_shortest_path_length(ptn.graph) #57.5s
 #they specify
 #i is origin and j is destination
 for keyi, data in result:
-    #print("keyi=",keyi)
-    #print("keyi=",keyi,"data=",data)
+    #print('keyi=',keyi)
+    #print('keyi=',keyi,'data=',data)
     #so key is EVERY vertex in the data and we only want selected vertices
     if keyi in vertex_to_zonei:
         #key is a vertex designated the closest to a centroid, so fill in this zone's data
         zonei = vertex_to_zonei[keyi]
         count=0
-        print("SSSP: ",zonei,keyi,end='')
+        print('SSSP: ',zonei,keyi,end='')
         for keyj in data:
             if keyj in vertex_to_zonei:
                 #we've got a designated centroid vertex for the destination
@@ -117,17 +165,17 @@ for keyi, data in result:
                 count+=1
             #endif
         #end for keyj
-        print(" count=",count)
+        print(' count=',count) #this is how many destinations are matched for each origin
     #endif
 #end for keyi
 
 
 secsAPSP = time.clock()-start
-print("finish")
-print("graphTestNetworkX: all_pairs_dijkstra_path_length test ",secsAPSP," secs")
+
+print('all_pairs_dijkstra_path_length test ',secsAPSP,' secs')
 
 #and save cij here
-with open("model-data/Cij_public.csv","w") as f:
+with open(cijCostMatrixFilename,'w') as f:
     for i in range(0,N):
         for j in range(0,N):
             f.write(str(Cij[i,j]))
@@ -160,10 +208,11 @@ for i in range(0,N):
     #end for j
 #end for i
 print(
-    "Cij stats: mean=",sum/datacount,
-    "missingcount=",missingcount,
-    " datacount=",datacount,
-    "max=",max,
-    "min=",min
+    'Cij stats: mean=',sum/datacount,
+    'missingcount=',missingcount,
+    'datacount=',datacount,
+    'max=',max,
+    'min=',min
 )
 
+#and we're finished...
